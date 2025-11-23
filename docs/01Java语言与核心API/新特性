@@ -1,0 +1,22 @@
+## 11. 新语言特性 (Record / Sealed / Pattern Matching) [3]
+
+### 11.1 Record
+是什么：数据载体语法糖（自动 equals/hashCode/toString/accessor）。  
+为什么：减少样板代码并提供不可变建模。  
+怎么用：record User(id, name)；使用 compact constructor 校验。  
+关键细节：字段 final；可定义自定义方法；序列化兼容关注。  
+面试提示：说明使用场景：DTO/配置对象。
+
+### 11.2 Sealed
+是什么：限制允许的子类增强穷举性与安全控制。  
+为什么：模式匹配方便全面处理（未来 switch）。  
+怎么用：sealed interface Shape permits Circle, Rect。  
+关键细节：子类需 final / sealed / non-sealed；跨模块限制。  
+面试提示：说明对 API 控制的价值。
+
+### 11.3 Pattern Matching
+是什么：instanceof 后自动类型绑定与 switch 模式匹配（JDK 演进）。  
+为什么：减少显式强制转换与样板。  
+怎么用：if (obj instanceof User u) { ... }；switch(pattern)。  
+关键细节：match 顺序；预览特性版本变化。  
+面试提示：谈语言可读性改进。

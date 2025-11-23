@@ -1,0 +1,134 @@
+## 3. I/O 与 NIO / NIO.2 [4]
+
+### 3.1 阻塞 vs 非阻塞 IO
+- 是什么：阻塞模式调用阻塞线程直到数据可用；非阻塞配合 Selector 轮询准备就绪通道；内核层仍可能阻塞在少数系统调用。  
+- 为什么：阻塞一连接一线程，线程堆栈+调度+上下文切换成本高；非阻塞减少线程、提升可扩展性（十万长连接）。  
+- 怎么用：单 Reactor（少量 Selector 线程）分发事件 → 业务工作线程池; 更高并发可用多 Reactor（主接收 + 子处理）。  
+- 关键细节：非阻塞 read/write 返回 0/部分读；需循环直到读完或返回 -1；粘包/半包需协议边界（长度字段/分隔符/固定头）。  
+- 常见陷阱：忙轮询（未正确处理 select 阻塞与兴趣集合更新）；错误假设一次 read 得到完整消息；线程在 Selector 回调中执行长逻辑阻塞其他连接。  
+- 面试提示：举“10 万连接：阻塞模式需近似 10 万线程 vs 非阻塞几十线程”并说明内存与上下文切换差异。  
+- 案例：改造阻塞 BIO 聊天服务器 → NIO 后峰值线程从 6000 降到 96，CPU 利用率下降 35%。
+
+### 3.2 Buffer 与 Channel
+- 是什么：Channel 抽象数据源/目的（FileChannel, SocketChannel）；Buffer 封装内存区并维护 position/limit/capacity 状态。  
+- 为什么：明确状态转移避免隐式复制；允许直接内存（DirectByteBuffer）减少内核交互开销。  
+- 怎么用：读入后 flip → 消费 → compact/clear；写出前确保 position 指向有效数据起点；大块传输选 DirectBuffer。  
+- 关键细节：clear 重置 position=0 limit=capacity；compact 保留未读数据移动至前部；DirectBuffer 分配昂贵（避免频繁创建，池化）；忘记 flip 导致空读。  
+- 常见陷阱：混淆 limit 与 capacity；重复 flip 破坏边界；DirectBuffer 未释放（等待 GC + Cleaner 导致延迟）。  
+- 面试提示：说明“flip = 写模式→读模式状态切换”与最典型 Bug。  
+- 案例：日志队列使用堆缓冲频繁拷贝 → 改 DirectByteBuffer 池化吞吐提升 18%。
+
+### 3.3 Selector 机制
+- 是什么：单线程轮询注册 Channel 的兴趣事件(OP_READ/OP_WRITE/OP_ACCEPT/OP_CONNECT) 并分发处理。  
+- 为什么：少量线程即可处理大量就绪事件，提高可扩展性与资源利用效率。  
+- 怎么用：select()/selectTimeout→遍历 selectedKeys→处理→移除 key（或调用 iterator.remove）；写事件只在“待写且缓冲未清空”时注册。  
+- 关键细节：旧 epoll 空轮询 bug（需 JDK 修复或 select 降级策略）；wakeup() 跨线程唤醒阻塞 select；处理过程中避免阻塞（业务线程池分离）。  
+- 常见陷阱：长期保持 OP_WRITE 导致空转；selectedKeys 不移除造成重复处理；在 Selector 线程执行耗时数据库调用。  
+- 面试提示：强调“Selector 线程只负责 IO 就绪分发”。  
+- 案例：支付网关曾在 Selector 回调直接调用外部服务导致整体吞吐骤降，拆分后恢复。
+
+### 3.4 零拷贝与高性能传输
+- 是什么：sendfile / transferTo / mmap 让数据在内核缓冲与网卡之间传递，减少用户态复制与上下文切换。  
+- 为什么：大文件/日志分发场景显著降低 CPU 消耗，提高吞吐。  
+- 怎么用：FileChannel.transferTo(socketChannel); 索引/只读文件 mmap 建立映射直接访问。  
+- 关键细节：TLS 情况下传统 sendfile 可能退化为常规路径；mmap 内存映射文件被截断可能抛 SIGBUS；PageCache 命中对性能关键。  
+- 常见陷阱：误将 mmap 当通用优化（小文件不一定收益）；忽略文件大小变化；不关闭映射对象（引用未释放）。  
+- 面试提示：画数据路径对比：read+write(4 次拷贝) vs sendfile(2 次)。  
+- 案例：文件分发系统由循环 read/write 改 transferTo，CPU 下降 30%，吞吐提升 25%。
+
+### 3.5 Scatter/Gather 与协议解析
+- 是什么：Scatter 将数据流分散读入多个 Buffer（如头部+体）；Gather 将多个 Buffer 合并写出。  
+- 为什么：避免手动拆分/拼接，减少数组复制，提高解析清晰度。  
+- 怎么用：channel.read(new ByteBuffer[]{header, body}); 写出时 channel.write(buffers)。  
+- 关键细节：适合固定/可预知头部长度；维护各 Buffer 的 position/remaining；部分写需循环继续。  
+- 常见陷阱：假设一次 write 全部发送；未处理半写导致协议断裂。  
+- 面试提示：描述“头部+体分离减少额外数组合并”。  
+- 案例：二进制协议加入长度字段+Scatter读取，序列化开销下降。
+
+### 3.6 NIO.2 文件 API
+- 是什么：Path/Files 取代旧 File；提供原子移动、符号链接、权限；WatchService 监听变化。  
+- 为什么：改进错误处理与跨平台一致性。  
+- 怎么用：Files.move(temp, target, ATOMIC_MOVE, REPLACE_EXISTING); WatchService 监听配置目录。  
+- 关键细节：WatchService 事件合并与丢失可能（需批处理与防抖）；文件权限 POSIX API 在不同平台差异；大目录遍历使用 Files.walk。  
+- 常见陷阱：监听大量目录未关闭 WatchKey；递归遍历忘记关闭 Stream。  
+- 面试提示：说明监听局限与防抖策略。  
+- 案例：配置中心使用 WatchService 结合校验 + 延迟 200ms 合并事件。
+
+### 3.7 AIO (Asynchronous IO)
+- 是什么：CompletionHandler / Future 模式，IO 完成后回调或通知，不阻塞等待。  
+- 为什么：进一步减少线程等待；但生态成熟度与性能优势有限。  
+- 怎么用：AsynchronousSocketChannel.connect / read / write with CompletionHandler。  
+- 关键细节：回调嵌套复杂度高；需自建错误处理链；背压控制困难。  
+- 常见陷阱：回调中直接发起下一层深度形成“回调地狱”；忽略异常路径导致连接泄漏。  
+- 面试提示：解释“在主流高性能服务中仍多选 Netty(NIO)”。  
+- 案例：尝试 AIO 后复杂度 > NIO，无明显收益回退。
+
+### 3.8 Netty 模型简述
+- 是什么：事件驱动异步网络框架，封装 Selector、Pipeline、ByteBuf。  
+- 为什么：减少样板及错误，提供高性能内存管理与编解码。  
+- 怎么用：Bootstrap+EventLoopGroup；ChannelPipeline 添加编解码器与业务处理器。  
+- 关键细节：ByteBuf 引用计数避免内存泄漏；单线程事件循环保证 handler 内无需锁（除跨线程共享）；可定制内存池。  
+- 常见陷阱：未释放 ByteBuf（LEAK 报告）；阻塞 EventLoop 导致心跳延迟。  
+- 面试提示：说明“为什么不要在 handler 里调用长阻塞操作”。  
+- 案例：心跳延迟报警 → 将耗时计算移出 EventLoop 后恢复正常。
+
+### 3.9 背压与流控
+- 是什么：在生产者-消费者速率不匹配时限制上游速度避免堆积。  
+- 为什么：无背压会导致内存膨胀/延迟激增。  
+- 怎么用：限制待写队列大小；监控 channel.isWritable()；结合应用级令牌/窗口协议。  
+- 关键细节：写缓冲高水位/低水位回调；拒绝或丢弃策略需记录度量。  
+- 常见陷阱：只监控 CPU 忽略积压队列；无降级策略强行积压。  
+- 面试提示：说明“背压 = 控制输入速率 + 缩短排队时间”。  
+- 案例：增加写队列水位监控后避免内存突增 OOM。
+
+### 3.10 文件与网络缓冲调优
+- 是什么：合理设置 OS 与 JVM 层缓冲减少系统调用与上下文切换。  
+- 为什么：缓冲过小频繁调用，过大浪费内存。  
+- 怎么用：SocketChannel 套接字缓冲（SO_SNDBUF/SO_RCVBUF）；DirectBuffer 池化；JVM -XX:MaxDirectMemorySize 控制上限。  
+- 关键细节：Linux rmem/wmem 上限可能限制套接字缓冲；避免与应用层重复过度缓存。  
+- 常见陷阱：盲目调巨大缓冲导致 GC 或内存占用增加；忽略平台限制导致设置无效。  
+- 面试提示：提到“测量再调优”与工具 netstat / ss / perf。  
+- 案例：调整 SO_SNDBUF 后批量发送延迟下降 12%。
+
+### 3.11 传输层常用参数
+- 是什么：TCP_NODELAY、SO_KEEPALIVE、SO_REUSEADDR、SO_LINGER。  
+- 为什么：控制延迟、连接生存与端口重用。  
+- 怎么用：短小延迟敏感请求关闭 Nagle：setTcpNoDelay(true)；长连接打开 KeepAlive；快速重启用 SO_REUSEADDR。  
+- 关键细节：Nagle+Delayed ACK 组合导致双倍 RTT；KeepAlive 默认间隔大（需 OS sysctl 调整）。  
+- 常见陷阱：错误开启 SO_LINGER 导致关闭阻塞；忽略 TIME_WAIT 导致端口耗尽。  
+- 面试提示：说明“小包 RPC → 关闭 Nagle”。  
+- 案例：关闭 Nagle 后 p99 延迟由 40ms 降到 27ms。
+
+### 3.12 性能度量与工具
+- 是什么：定位 IO 瓶颈与分配热点工具链。  
+- 怎么用：iostat / vmstat / pidstat / perf / async-profiler / JFR / strace。  
+- 关键细节：区分 CPU vs IO wait；火焰图看阻塞堆栈；JFR 低入侵采样。  
+- 常见陷阱：将 IO wait 误判为 CPU 计算；只看平均不关注 p99。  
+- 面试提示：给出“指标→采样→火焰图→改代码”路径。  
+- 案例：识别频繁小包写 → 批量聚合传输吞吐提升。
+
+### 3.13 高频问答速记
+| 问题 | 速答 |
+| ---- | ---- |
+| 为什么非阻塞扩展性好 | 减少一连接一线程 → 降低调度与栈内存成本 |
+| flip 的作用 | 将写模式转换为读模式：limit=position, position=0 |
+| 零拷贝价值 | 减少用户态复制与上下文切换，传输大文件吞吐提升 |
+| 半包处理策略 | 协议长度字段 / 定界符 / 累积缓冲区检测完整性 |
+| Selector 线程能否执行业务 | 不建议，会阻塞其他 IO 事件分发 |
+| DirectBuffer 优劣 | 访问快减少拷贝 / 分配慢需池化管理 |
+| 为什么 sendfile 与 TLS 有时退化 | 加密需要用户态处理导致无法完全绕过复制 |
+| 为什么 OP_WRITE 不常驻 | 仅在写缓冲未清空时注册，避免空轮询 |
+
+### 3.14 最佳实践清单
+- Selector 线程只做 IO 分发与轻量编解码。  
+- 使用长度字段或分隔符解决粘包半包。  
+- 池化并重用 DirectByteBuffer；监控直接内存上限。  
+- 注册 OP_WRITE 时机：写缓冲未清空才注册，完成后取消。  
+- 零拷贝优先用于大文件与日志分发；小数据不必强求。  
+- 参数调优基于度量：先抓指标再调整缓冲 / TCP 选项。  
+- 有背压：检测队列与写水位，拒绝或限速而不是无限排队。  
+- 统一编码与解码层（ByteBuf/Buffer 管理），避免复制。  
+- 文件事件监听处理防抖与补偿。  
+- 生产基准：记录 p99/p999 延迟与吞吐，持续回归。  
+
+---
