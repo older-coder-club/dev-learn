@@ -1,4 +1,4 @@
-* [知识点总览](index.md)
+* [知识点总览](README.md)
 * [Java语言与核心API](01Java语言与核心API/index.md)
 * [集合框架](01Java语言与核心API/01集合框架.md)
 * [异常](01Java语言与核心API/02异常.md)
