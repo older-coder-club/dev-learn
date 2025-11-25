@@ -1,5 +1,5 @@
-* [概览](README.md)
-* [Java语言与核心API](01Java语言与核心API/Java语言与核心API详解.md)
+* [知识点总览](index.md)
+* [Java语言与核心API](01Java语言与核心API/index.md)
 * [并发与多线程](02并发与多线程/并发与多线程详解.md)
 * [JVM与性能](03JVM与性能/JVM与性能详解.md)
 * [Spring生态](04Spring生态/Spring生态详解.md)
